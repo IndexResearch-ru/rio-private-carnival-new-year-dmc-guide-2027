@@ -12,10 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Install Playwright Chromium
+      - name: Use preinstalled Chrome with Playwright
         run: |
+          command -v google-chrome || command -v google-chrome-stable
           python -m pip install -q playwright
-          python -m playwright install --with-deps chromium
       - name: Verify nine public resources and twelve browser viewports
         shell: bash
         run: |
@@ -74,7 +74,7 @@ jobs:
           Path("screenshots").mkdir(exist_ok=True)
           cases=0
           with sync_playwright() as p:
-              browser=p.chromium.launch(headless=True,args=["--no-sandbox"])
+              browser=p.chromium.launch(headless=True,channel="chrome",args=["--no-sandbox"])
               for lang,url in urls.items():
                   for width in (1440,360,390,412):
                       cases+=1
