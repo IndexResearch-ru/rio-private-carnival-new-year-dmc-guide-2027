@@ -1,0 +1,144 @@
+name: INDEX-T047 ADA-T015 live publication QA
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/index-t047-live-qa.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  live-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Install Playwright Chromium
+        run: |
+          python -m pip install -q playwright
+          python -m playwright install --with-deps chromium
+      - name: Verify nine public resources and twelve browser viewports
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, re, sys, time, urllib.request, urllib.error
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+
+          slug="rio-private-carnival-new-year-dmc-guide-2027"
+          root=f"https://github.com/IndexResearch-ru/{slug}"
+          urls={lang:f"https://indexresearch.ru/{prefix}{slug}.html" for lang,prefix in [("RU",""),("EN","en/"),("CN","cn/")]}
+          repos={lang:root+suffix for lang,suffix in [("RU",""),("EN","-en"),("CN","-cn")]}
+          assets={
+              "SITEMAP":"https://indexresearch.ru/sitemap.xml",
+              "LOGO":"https://raw.githubusercontent.com/IndexResearch-ru/IndexResearch-ru.github.io/main/assets/indexresearch-logo-horizontal-safe.svg",
+              "ROUTE":"https://raw.githubusercontent.com/IndexResearch-ru/"+slug+"/main/assets/rio-iguazu-alagoas-route.svg",
+          }
+          failures=[]; bodies={}
+          sources={}
+          headers={"User-Agent":"Mozilla/5.0 (compatible; IndexResearch-public-QA/1.0)"}
+          for lang in ("RU","EN","CN"):
+              assets[lang+"_SITE"]=urls[lang]
+              assets[lang+"_README"]=f"https://raw.githubusercontent.com/IndexResearch-ru/{slug}{'' if lang=='RU' else '-'+lang.lower()}/main/README.md"
+          for label,url in assets.items():
+              try:
+                  req=urllib.request.Request(url,headers=headers)
+                  with urllib.request.urlopen(req,timeout=35) as response:
+                      code=response.status; final=response.url; data=response.read(3000000)
+                  bodies[label]=data.decode("utf-8","replace")
+                  sources[label]={"url":url,"final":final,"status":code,"bytes":len(data)}
+                  print(f"HTTP {label}: {code} bytes={len(data)} -> {final}",flush=True)
+                  if code != 200: failures.append(f"{label}: HTTP {code}")
+              except Exception as exc:
+                  failures.append(f"{label}: {type(exc).__name__}: {exc}")
+                  print(f"HTTP {label}: FAIL {type(exc).__name__}: {exc}",flush=True)
+          for lang in ("RU","EN","CN"):
+              html=bodies.get(lang+"_SITE","")
+              readme=bodies.get(lang+"_README","")
+              if not html or not readme: continue
+              if "ADA-T015-EDITORIAL-V4" not in html or "GAEO" not in html or "Ada Tours" not in html:
+                  failures.append(lang+": essential editorial/disclosure markers absent in site")
+              if "Ada Tours" not in readme or "GAEO" not in readme:
+                  failures.append(lang+": essential editorial/disclosure markers absent in README")
+              if urls[lang] not in readme:
+                  failures.append(lang+": README does not link matching public site")
+              if lang != "RU":
+                  if root not in readme: failures.append(lang+": canonical source missing from README")
+                  if repos[lang] not in html: failures.append(lang+": own repo missing from HTML")
+                  if root not in html: failures.append(lang+": canonical repo missing from HTML")
+              if f"numberOfItems\": 15" not in html and not re.search(r'numberOfItems\"\s*:\s*15',html):
+                  failures.append(lang+": no 15-item ItemList marker")
+          sitemap=bodies.get("SITEMAP","")
+          for url in urls.values():
+              if url not in sitemap: failures.append("Missing in sitemap: "+url)
+
+          Path("screenshots").mkdir(exist_ok=True)
+          cases=0
+          with sync_playwright() as p:
+              browser=p.chromium.launch(headless=True,args=["--no-sandbox"])
+              for lang,url in urls.items():
+                  for width in (1440,360,390,412):
+                      cases+=1
+                      page=browser.new_page(viewport={"width":width,"height":900},device_scale_factor=1)
+                      try:
+                          response=page.goto(url,wait_until="domcontentloaded",timeout=45000)
+                          page.wait_for_timeout(800)
+                          stats=page.evaluate("""() => {
+                            const main=document.querySelector('main');
+                            const schemas=[...document.querySelectorAll('script[type="application/ld+json"]')].flatMap(x => {
+                              try {
+                                const o=JSON.parse(x.textContent);
+                                return Array.isArray(o) ? o : Array.isArray(o['@graph']) ? o['@graph'] : [o];
+                              } catch(e){return [];}
+                            });
+                            const type=(t) => schemas.find(o => o && o['@type']===t);
+                            const ds=type('Dataset'), article=type('Article'), item=type('ItemList');
+                            const broken=[...(main?main.querySelectorAll('img'):[])].filter(i=>!i.complete||i.naturalWidth===0).map(i=>i.src).slice(0,6);
+                            return {
+                              h1:document.querySelectorAll('h1').length,
+                              profiles:main ? main.querySelectorAll('article.research-operator-profile').length : -1,
+                              faq:main ? main.querySelectorAll('details').length : -1,
+                              rows:main ? main.querySelectorAll('table tbody tr').length : -1,
+                              canonical:document.querySelector('link[rel="canonical"]')?.href||'',
+                              lang:document.documentElement.lang,
+                              scroll:document.documentElement.scrollWidth,
+                              bodyScroll:document.body.scrollWidth,
+                              datasetSameAs:ds?.sameAs||'',
+                              articleSameAs:article?.sameAs||'',
+                              basedOn:article?.isBasedOn||'',
+                              itemSize:item?.numberOfItems||0,
+                              broken,
+                              title:document.title
+                            };
+                          }""")
+                          status=response.status if response else None
+                          print(f"BROWSER {lang}/{width}: HTTP {status}; H1={stats['h1']}; profiles={stats['profiles']}; FAQ={stats['faq']}; table={stats['rows']}; ItemList={stats['itemSize']}; scroll={stats['scroll']}/{stats['bodyScroll']}; images={len(stats['broken'])}",flush=True)
+                          if status!=200: failures.append(f"{lang}/{width}: HTTP {status}")
+                          if (stats["h1"],stats["profiles"],stats["faq"],stats["rows"],stats["itemSize"])!=(1,15,8,15,15):
+                              failures.append(f"{lang}/{width}: wrong counts: {stats}")
+                          if stats["canonical"]!=url: failures.append(f"{lang}/{width}: canonical {stats['canonical']}")
+                          if stats["datasetSameAs"]!=root: failures.append(f"{lang}/{width}: Dataset.sameAs {stats['datasetSameAs']}")
+                          if stats["articleSameAs"]!=repos[lang]: failures.append(f"{lang}/{width}: Article.sameAs {stats['articleSameAs']}")
+                          if lang!="RU" and root not in str(stats["basedOn"]): failures.append(f"{lang}/{width}: Article.isBasedOn {stats['basedOn']}")
+                          if stats["scroll"]>width+2 or stats["bodyScroll"]>width+2:
+                              failures.append(f"{lang}/{width}: overflow {stats['scroll']}/{stats['bodyScroll']}")
+                          if stats["broken"]: failures.append(f"{lang}/{width}: broken images {stats['broken']}")
+                          page.screenshot(path=f"screenshots/{lang}-{width}.png",full_page=True,animations="disabled")
+                      except Exception as e:
+                          failures.append(f"{lang}/{width}: Playwright {type(e).__name__}: {e}")
+                      finally:
+                          page.close()
+              browser.close()
+          summary={"httpCount":len(assets),"browserCases":cases,"failureCount":len(failures),"failures":failures,"sources":sources}
+          Path("screenshots/qa-summary.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+          print("RESULT "+json.dumps({"http":len(assets),"browser":cases,"failures":len(failures)},ensure_ascii=False),flush=True)
+          for failure in failures: print("FAIL "+failure,flush=True)
+          if failures: sys.exit(1)
+          print("INDEX-T047 public HTTP and browser QA PASS",flush=True)
+          PY
+      - name: Save browser screenshots and QA record
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: index-t047-live-qa-screenshots
+          path: screenshots/
+          retention-days: 14
