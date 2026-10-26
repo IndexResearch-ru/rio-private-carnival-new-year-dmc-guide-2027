@@ -1,0 +1,37 @@
+name: INDEX-T047 image assets live HTTP QA
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/index-t047-image-assets.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify 3 referenced assets with content and MIME checks
+        run: |
+          python - <<'PY'
+          import urllib.request
+          urls=[
+            ("README_LOGO","https://raw.githubusercontent.com/IndexResearch-ru/IndexResearch-ru.github.io/main/assets/indexresearch-logo-horizontal-safe.svg","image/svg+xml"),
+            ("CN_ROUTE","https://raw.githubusercontent.com/IndexResearch-ru/rio-private-carnival-new-year-dmc-guide-2027/main/assets/rio-iguazu-alagoas-route.svg","image/svg+xml"),
+            ("RU_EN_CN_OG","https://indexresearch.ru/android-chrome-512x512.png","image/png"),
+          ]
+          failures=[]
+          for label,url,expected in urls:
+            try:
+              with urllib.request.urlopen(urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 IndexResearch/1.0"}),timeout=30) as response:
+                code=response.status; final=response.url; mime=response.headers.get_content_type();body=response.read(100000)
+              valid=(code==200 and mime==expected and (body.startswith(b'\x89PNG\r\n\x1a\n') if expected=="image/png" else b"<svg" in body[:1024]))
+              print(f"{label}: HTTP={code} final={final} mime={mime} bytes-read={len(body)} valid={valid}",flush=True)
+              if not valid: failures.append(label)
+            except Exception as e:
+              print(f"{label}: ERROR {type(e).__name__} {e}",flush=True);failures.append(label)
+          print(f"IMAGE_RESULTS 3; errors={len(failures)}",flush=True)
+          if failures: raise SystemExit("Image QA failed: "+",".join(failures))
+          print("INDEX-T047 image assets live HTTP QA PASS")
+          PY
