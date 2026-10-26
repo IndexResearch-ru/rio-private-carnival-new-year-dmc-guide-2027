@@ -1,0 +1,118 @@
+name: INDEX-T047 author-link live HTTP audit
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/index-t047-author-links.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Visit each unique destination of 157 author links
+        shell: bash
+        run: |
+          python - <<'PY'
+          import concurrent.futures, html, json, re, time, urllib.error, urllib.parse, urllib.request
+          from pathlib import Path
+          slug="rio-private-carnival-new-year-dmc-guide-2027"
+          root=f"https://github.com/IndexResearch-ru/{slug}"
+          sources=[
+            ("INDEX-T047-GITHUB",root,f"https://raw.githubusercontent.com/IndexResearch-ru/{slug}/main/README.md","md"),
+            ("INDEX-T047-SITE",f"https://indexresearch.ru/{slug}.html",f"https://indexresearch.ru/{slug}.html","html"),
+            ("INDEX-T047-GITHUB-EN",root+"-en",f"https://raw.githubusercontent.com/IndexResearch-ru/{slug}-en/main/README.md","md"),
+            ("INDEX-T047-SITE-EN",f"https://indexresearch.ru/en/{slug}.html",f"https://indexresearch.ru/en/{slug}.html","html"),
+            ("INDEX-T047-GITHUB-CN",root+"-cn",f"https://raw.githubusercontent.com/IndexResearch-ru/{slug}-cn/main/README.md","md"),
+            ("INDEX-T047-SITE-CN",f"https://indexresearch.ru/cn/{slug}.html",f"https://indexresearch.ru/cn/{slug}.html","html"),
+          ]
+          headers={"User-Agent":"Mozilla/5.0 IndexResearch-public-author-link-audit/1.0"}
+          def fetch(url):
+              req=urllib.request.Request(url,headers=headers)
+              with urllib.request.urlopen(req,timeout=30) as r:
+                  return r.status,r.url,r.read(3000000).decode("utf-8","replace")
+          docs=[]; errors=[]
+          for label,base,url,kind in sources:
+              try:
+                  code,final,body=fetch(url)
+                  print(f"SOURCE {label}: HTTP {code} bytes={len(body)}",flush=True)
+                  if code!=200: errors.append(f"{label} source HTTP {code}")
+                  docs.append((label,base,kind,body))
+              except Exception as e:
+                  errors.append(f"{label} source: {type(e).__name__} {e}")
+                  print(f"SOURCE {label} ERROR: {e}",flush=True)
+          def parse(body,kind):
+              if kind=="html":
+                  a=body.find("<main");b=body.find("</main>",a)
+                  if a<0 or b<0: return []
+                  body=body[a:b]
+                  body=re.sub(r'<nav class="breadcrumbs"[\s\S]*?</nav>',"",body)
+              links=[]; covered=[]
+              if kind=="md":
+                  for m in re.finditer(r'\[([^\]\n]+)\]\(([^)\s]+)\)',body):
+                      covered.append((m.start(),m.end()))
+                      if m.start()>0 and body[m.start()-1]=="!": continue
+                      links.append((m.start(),m.group(2)))
+                  for m in re.finditer(r'<img\b[^>]*>',body,re.I):
+                      covered.append((m.start(),m.end()))
+              for m in re.finditer(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>[\s\S]*?</a>',body,re.I):
+                  covered.append((m.start(),m.end()))
+                  links.append((m.start(),html.unescape(m.group(1))))
+              if kind=="md":
+                  for m in re.finditer(r'https?://[^\s<>"\'\]\)]+',body):
+                      if any(a<=m.start()<b for a,b in covered): continue
+                      links.append((m.start(),m.group(0).rstrip('.,;:!?')))
+              return [url for _,url in sorted(links) if url and not url.startswith(("#","mailto:","tel:","javascript:"))]
+          entries=[]
+          for label,base,kind,body in docs:
+              hrefs=parse(body,kind)
+              print(f"AUTHOR_HREFS {label}: {len(hrefs)}",flush=True)
+              for i,raw in enumerate(hrefs,1):
+                  resolved=urllib.parse.urljoin(base+"/blob/main/README.md" if kind=="md" else base,raw)
+                  entries.append({"publication":label,"order":i,"href":raw,"url":resolved})
+          unique=sorted(set(e["url"] for e in entries))
+          print(f"AUTHOR_LINKS total={len(entries)} unique={len(unique)}",flush=True)
+          if len(entries)!=157: errors.append(f"author link count drift: {len(entries)} != 157")
+          allowed={"indexresearch.ru","www.indexresearch.ru","github.com","raw.githubusercontent.com","adatours.ru","www.adatours.ru","www.liesa.com.br","liesa.com.br"}
+          def test(url):
+              host=urllib.parse.urlparse(url).hostname or ""
+              if host not in allowed: return {"url":url,"status":None,"final":None,"note":"host not on QA allowlist"}
+              for attempt in range(2):
+                  try:
+                      req=urllib.request.Request(url,headers=headers)
+                      with urllib.request.urlopen(req,timeout=24) as r:
+                          r.read(256)
+                          return {"url":url,"status":r.status,"final":r.url,"note":""}
+                  except urllib.error.HTTPError as e:
+                      if attempt==0 and (e.code==429 or e.code>=500):
+                          time.sleep(1.0);continue
+                      return {"url":url,"status":e.code,"final":e.url,"note":str(e)}
+                  except Exception as e:
+                      if attempt==0:
+                          time.sleep(1.0);continue
+                      return {"url":url,"status":None,"final":None,"note":type(e).__name__+": "+str(e)}
+          with concurrent.futures.ThreadPoolExecutor(max_workers=7) as pool:
+              results=list(pool.map(test,unique))
+          statuses={x["url"]:x for x in results}
+          for x in results:
+              print(f"DEST|{x['status']}|{x['final']}|{x['url']}|{x['note']}",flush=True)
+              host=urllib.parse.urlparse(x["url"]).hostname or ""
+              if host in {"github.com","indexresearch.ru","www.indexresearch.ru","raw.githubusercontent.com"} and x["status"]!=200:
+                  errors.append(f"first-party destination failed: {x['url']}: {x['status']} {x['note']}")
+          Path("audit").mkdir(exist_ok=True)
+          report={"sources":len(docs),"authorLinks":len(entries),"uniqueTargets":len(unique),"links":entries,"destinations":results,"errors":errors}
+          Path("audit/index-t047-author-links.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+          print(f"AUDIT_RESULT links={len(entries)} unique={len(unique)} errors={len(errors)}",flush=True)
+          for e in errors: print("FAIL "+e,flush=True)
+          if errors: raise SystemExit(1)
+          print("INDEX-T047 author link audit PASS")
+          PY
+      - name: Save per-link destination and redirect audit
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: index-t047-author-link-report
+          path: audit/index-t047-author-links.json
+          retention-days: 14
