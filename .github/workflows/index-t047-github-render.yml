@@ -1,0 +1,78 @@
+name: INDEX-T047 GitHub rendered README QA
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/index-t047-github-render.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  render-readmes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install browser automation
+        shell: bash
+        run: |
+          command -v google-chrome || command -v google-chrome-stable
+          python -m pip install -q playwright
+      - name: Inspect rendered GitHub README HTML in desktop and mobile
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          slug="rio-private-carnival-new-year-dmc-guide-2027"
+          targets={key:f"https://github.com/IndexResearch-ru/{slug}{suffix}" for key,suffix in [("RU",""),("EN","-en"),("CN","-cn")]}
+          errors=[]
+          outputs=[]
+          Path("rendered").mkdir(exist_ok=True)
+          with sync_playwright() as p:
+              browser=p.chromium.launch(headless=True,channel="chrome",args=["--no-sandbox"])
+              for lang,url in targets.items():
+                  for width in (1440,390):
+                      page=browser.new_page(viewport={"width":width,"height":900},device_scale_factor=1)
+                      try:
+                          r=page.goto(url,wait_until="domcontentloaded",timeout=40000)
+                          page.locator("#readme article.markdown-body, article.markdown-body").first.wait_for(timeout=15000)
+                          page.wait_for_timeout(650)
+                          v=page.evaluate("""() => {
+                            const root=document.querySelector('#readme article.markdown-body')||document.querySelector('article.markdown-body');
+                            if(!root) return {missing:true};
+                            const imgs=Array.from(root.querySelectorAll('img')).map(i=>({alt:i.alt,src:i.src,complete:i.complete,width:i.naturalWidth}));
+                            return {heading:root.querySelector('h1')?.textContent||'',h1:root.querySelectorAll('h1').length,
+                                tables:root.querySelectorAll('table').length,tableRows:root.querySelectorAll('table tbody tr').length,
+                                images:imgs,links:root.querySelectorAll('a[href]').length,bodyLength:root.innerText.length};
+                          }""")
+                          status=r.status if r else None
+                          item={"lang":lang,"viewport":width,"status":status,**v}
+                          outputs.append(item)
+                          print("RENDER "+json.dumps(item,ensure_ascii=False),flush=True)
+                          if status!=200: errors.append(f"{lang}/{width}: HTTP {status}")
+                          if v.get("missing") or v.get("h1")!=1 or v.get("tableRows")!=15 or v.get("tables",0)<1:
+                              errors.append(f"{lang}/{width}: missing expected README structure")
+                          if len(v.get("images",[]))<(2 if lang=="CN" else 1):
+                              errors.append(f"{lang}/{width}: expected README images missing")
+                          if any(not i["complete"] or i["width"]<1 for i in v.get("images",[])):
+                              errors.append(f"{lang}/{width}: broken GitHub rendered image")
+                          page.screenshot(path=f"rendered/{lang}-{width}.png",full_page=True,animations="disabled")
+                      except Exception as e:
+                          errors.append(f"{lang}/{width}: {type(e).__name__}: {e}")
+                          print(f"ERROR {lang}/{width}: {type(e).__name__}: {e}",flush=True)
+                      finally:
+                          page.close()
+              browser.close()
+          Path("rendered/report.json").write_text(json.dumps({"cases":outputs,"errors":errors},ensure_ascii=False,indent=2),encoding="utf-8")
+          print(f"GITHUB_README_QA cases={len(outputs)} errors={len(errors)}",flush=True)
+          for e in errors: print("FAIL "+e,flush=True)
+          if errors: raise SystemExit(1)
+          print("INDEX-T047 GITHUB README RENDER PASS",flush=True)
+          PY
+      - name: Store screenshots and report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: index-t047-github-render
+          path: rendered/
+          retention-days: 14
